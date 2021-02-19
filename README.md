@@ -4,7 +4,8 @@
 `channeltest <frequency multiplier> <symbol width> <symbol size>`
 
 ## TODO:
-* aggregate frames so that we can seek to the strongest position. This would make single frame syncs a lot easier
+* aggregate frames so that we can seek to the strongest position. This would make single frame syncs a lot easier.
+  We can do this by separating out processing logic from recording logic, and then using a windowed dft to find where syncs are maximised
 * better smoothing to allow lower rates
 * allow non-2^n buffer sizes for closer tweaking
 

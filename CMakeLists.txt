@@ -10,4 +10,5 @@ find_package(ZLIB REQUIRED)
 
 add_executable(channeltest main.cpp)
 target_precompile_headers(channeltest PUBLIC /usr/include/gnuplot-iostream.h)
+target_compile_options(channeltest PUBLIC -fstack-protector-all)
 target_link_libraries(channeltest fftw3 portaudio Boost::system Boost::iostreams Threads::Threads ZLIB::ZLIB)

@@ -18,7 +18,6 @@
 Gnuplot plot("gnuplot 2>/dev/null");
 // SOURCE: https://stackoverflow.com/a/1798833
 void setunbuf() {
-  int c;
   static struct termios oldt, newt;
 
   /*tcgetattr gets the parameters of the current terminal
@@ -44,34 +43,58 @@ constexpr int sample_rate = 44100;
 constexpr int max_buffer_size = 4096;
 int buffer_size; //sample_rate/64;
 double sym_len;
-constexpr int n_octaves = 2;
+constexpr int scale_steps = 2;
+constexpr int scale_width = 4;
+constexpr double scale_sep = 1.8; //M_PI / 3 * 2 - 0.1;
+constexpr double step_mul = 1.1892071; //(M_PI - 3) + 1;
+consteval std::array<std::array<double, scale_width>, scale_steps + 1> gen_scale_base() {
+  std::array<std::array<double, scale_width>, scale_steps + 1> ret{{
+        {440, 554.365, 659.25511, 783.99087}
+  }};
+//  for (size_t i = 0; i < scale_width; ++i)
+//    ret[1][i] = ret[0][i] * 2;
+//  for (size_t i = 0; i < scale_width; ++i)
+//    ret[2][i] = ret[0][i] * 4;
+  for (size_t i = 1; i < ret.size(); ++i)
+    for (auto j = 0; j < scale_width; ++j)
+      ret[i][j] = ret[i-1][j] * 2;
+//  for (size_t i = 0; i < ret.size(); ++i ) {
+//    if (i != 0)
+//      ret[i][0] = ret[i-1][0] * scale_sep;
+//    for (size_t j = 1; j < scale_width; ++j)
+//      ret[i][j]  = ret[i][j-1] * step_mul;
+//  }
+  return ret;
+}
+
+constinit std::array<std::array<double, scale_width>, scale_steps + 1> scale_base = gen_scale_base();
+
 struct freq_params {
   double shift;
-  std::vector<double> scale = {
-    440 * shift,
-    523.25 * shift,
-    659.25 * shift,
-    783.99 * shift
-  };
+  std::array<std::array<double, scale_width>, scale_steps + 1> scale = scale_base;
 
-  double carrier = scale[0] * (1 << n_octaves);
-  double sync_begin = scale[1] * (1 << n_octaves);
-  double sync_mid = scale[2] * (1 << n_octaves);
-  double sync_end = scale[3] * (1 << n_octaves);
+  double carrier()    const noexcept { return scale[scale_steps][0]; }
+  double sync_begin() const noexcept { return scale[scale_steps][1]; }
+  double sync_mid()   const noexcept { return scale[scale_steps][2]; }
+  double sync_end()   const noexcept { return scale[scale_steps][3]; }
 
-  freq_params(double shift_) : shift{shift_} {}
+  freq_params(double shift_) : shift{shift_} {
+    for (auto& i : scale)
+      for (auto& j : i)
+        j *= shift;
+  }
 };
 
 class spinlock {
-  std::atomic<bool> b{false};
+  std::atomic_flag flag;
 
 public:
   void lock() {
-    while (b.exchange(true));
+    while (flag.test_and_set(std::memory_order_acquire));
   }
 
   void unlock() {
-    b = false;
+    flag.clear(std::memory_order_release);
   }
 };
 
@@ -159,7 +182,7 @@ struct input {
       }
     }
 
-    auto carrier_mag = get_mag(dft_out.data(), frameCount, freqs.carrier);
+    auto carrier_mag = get_mag(dft_out.data(), frameCount, freqs.carrier());
 
     if (remaining_quiet) {
       --remaining_quiet;
@@ -186,9 +209,9 @@ struct input {
       return 0;
     }
 
-    auto start_mag = get_mag(dft_out.data(), frameCount, freqs.sync_begin);
-    auto mid_mag = get_mag(dft_out.data(), frameCount, freqs.sync_mid);
-    auto end_mag = get_mag(dft_out.data(), frameCount, freqs.sync_end);
+    auto start_mag = get_mag(dft_out.data(), frameCount, freqs.sync_begin());
+    auto mid_mag = get_mag(dft_out.data(), frameCount, freqs.sync_mid());
+    auto end_mag = get_mag(dft_out.data(), frameCount, freqs.sync_end());
 
     auto match_thresh = (carrier_mag + start_mag + mid_mag + end_mag) / 12;
 
@@ -235,12 +258,12 @@ struct input {
 
     uint64_t sym = 0;
 
-    for (int octave = 0; octave < n_octaves; ++octave) {
+    for (size_t level = 0; level < scale_steps; ++level) {
       size_t max_freq;
       double max_val = -INFINITY;
 
-      for (size_t i = 0; i < freqs.scale.size(); ++i) {
-        if (auto x = get_mag(dft_out.data(), frameCount, freqs.scale[i] * (1<<octave)); x > max_val) {
+      for (size_t i = 0; i < scale_width; ++i) {
+        if (auto x = get_mag(dft_out.data(), frameCount, freqs.scale[level][i]); x > max_val) {
           max_freq = i;
           max_val = x;
         }
@@ -277,7 +300,7 @@ struct output {
   spinlock msgs_spinlock;
   std::queue<std::string> msgs;
   std::queue<uint8_t> data_out;
-  std::array<double, n_octaves + 1> curr_freqs;
+  std::array<double, scale_steps + 1> curr_freqs;
   bool has_freqs = false;
 
   uint64_t sym_pos;
@@ -296,13 +319,13 @@ struct output {
   }
 
   float start_from_pos() {
-    float ret = sin_from_pos(freqs.carrier);
+    float ret = sin_from_pos(freqs.carrier());
     if (sym_pos < sym_len)
-      ret += sin_from_pos(freqs.sync_begin);
+      ret += sin_from_pos(freqs.sync_begin());
     else if (sym_pos < 4*sym_len)
-      ret += sin_from_pos(freqs.sync_mid);
+      ret += sin_from_pos(freqs.sync_mid());
     else
-      ret += sin_from_pos(freqs.sync_end);
+      ret += sin_from_pos(freqs.sync_end());
 
     ++sym_pos;
     return ret / 2;
@@ -335,6 +358,8 @@ struct output {
         std::string msg;
         {
           std::unique_lock<spinlock> lock{msgs_spinlock};
+//          if (msgs.size() == 0)
+//            throw std::runtime_error{"Something ate a message!"};
           msg = std::move(msgs.front());
           msgs.pop();
         }
@@ -349,11 +374,11 @@ struct output {
 
     if (!has_freqs) {
       auto dat_acc = data_out.front();
-      for (size_t i = 0; i < n_octaves; ++i) {
-        curr_freqs[i] = freqs.scale[dat_acc & 3] *  (1<<(n_octaves-i - 1));
+      for (size_t i = 0; i < scale_steps; ++i) {
+        curr_freqs[i] = freqs.scale[scale_steps - i - 1][dat_acc & 3];
         dat_acc >>= 2;
       }
-      curr_freqs[n_octaves] = freqs.carrier;
+      curr_freqs[scale_steps] = freqs.carrier();
       has_freqs = true;
     }
 
@@ -413,6 +438,13 @@ int forward_output(void const* input, void* output,
 
 
 int main(int argc, char** argv) {
+  for (auto& i : scale_base) {
+    for (auto& j : i)
+      std::cout << j << " ";
+    std::cout << std::endl;
+  }
+
+
   std::string line;
 
   PaStream* out, * in;
@@ -420,8 +452,8 @@ int main(int argc, char** argv) {
   auto sym_frames = argc >= 2 ? std::stof(argv[1]) : 4;
 
   sym_len = buffer_size = argc >= 4 ? std::stoi(argv[3]) : 256; //1024;
-  output out_s{argc >= 3 ? std::stod(argv[2]) : 3};
-  input in_s{argc >= 3 ? std::stod(argv[2]) : 3};
+  output out_s{argc >= 3 ? std::stod(argv[2]) : 1};
+  input in_s{argc >= 3 ? std::stod(argv[2]) : 1};
 
   if (int err = ::Pa_OpenDefaultStream(&in, 1, 0, paFloat32, sample_rate, buffer_size, &forward_input, &in_s))
     throw std::runtime_error{"Failed to open input: "s + Pa_GetErrorText(err)};
@@ -430,7 +462,7 @@ int main(int argc, char** argv) {
   if (int err = Pa_StartStream(in))
     throw std::runtime_error{"Failed to start input: "s + Pa_GetErrorText(err)};
 
-  auto get_mag = [&](auto freq, auto elem) {
+  auto get_mag = [&](double freq, auto elem) {
     return in_s.get_mag(elem.data(), buffer_size, freq);
   };
 
@@ -451,23 +483,26 @@ int main(int argc, char** argv) {
           latest = in_s.hist.back();
         }
 
-        std::vector<float> upper, lower;
-        for (auto i : in_s.freqs.scale) {
-          lower.push_back(get_mag(i, latest));
-          upper.push_back(get_mag(i * 2, latest));
-        }
+        std::array<std::array<double, scale_width>, scale_steps> mags;
+        for (size_t i = 0; i < mags.size(); ++i)
+          for (size_t j = 0; j < scale_width; ++j)
+            mags[i][j] = get_mag(in_s.freqs.scale[i][j], latest);
+
         if (loop_n % 24*3) {
-          auto max = std::max(*std::max_element(upper.begin(), upper.end()), *std::max_element(lower.begin(), lower.end()));
+          float max = -INFINITY;
+          for (auto& i : mags)
+            for (auto& j : i)
+              if (max < j)
+                max = j;
           scale_plot << "set for [i=1:100] paxis i linewidth 1 range [0:" << max << "]\n";
         }
         scale_plot << "$DATA << EOF\n";
         std::string dat = "1 2 3 4\n";
-        for (auto i : upper)
-          dat += std::to_string(i) + ' ';
-        dat.back() = '\n';
-        for (auto i : lower)
-          dat += std::to_string(i) + ' ';
-        dat.back() = '\n';
+        for (auto& i : mags) {
+          for (auto j : i)
+            dat += std::to_string(j) + ' ';
+          dat.back() = '\n';
+        }
         dat += "EOF\n";
         scale_plot << dat
                    << "plot for [i=1:4] $DATA using i title columnhead\n"
@@ -481,8 +516,11 @@ int main(int argc, char** argv) {
       hist_plot << "set logscale y\n"
                    "set xrange [0:" << carrier_plot_width - 1 << "]\n";
 
+
+      auto loop_start = std::chrono::high_resolution_clock::now();
       while (true) {
-        std::this_thread::sleep_for(1s/60);
+        std::this_thread::sleep_until(loop_start + (1s/60));
+        loop_start = std::chrono::high_resolution_clock::now();
         decltype(in_s.hist) hist;
         {
           std::unique_lock lock{in_s.hist_spinlock};
@@ -495,14 +533,15 @@ int main(int argc, char** argv) {
         auto offset = (hist.size() < carrier_plot_width) ? 0 : hist.size() - carrier_plot_width;
         std::vector<double> carrier_plot, sync_begin_plot, sync_mid_plot, sync_end_plot, data_plot;
         for (size_t i = offset; i < hist.size(); ++i) {
-          carrier_plot.push_back(get_mag(in_s.freqs.carrier, hist[i]));
-          sync_begin_plot.push_back(get_mag(in_s.freqs.sync_begin, hist[i]));
-          sync_mid_plot.push_back(get_mag(in_s.freqs.sync_mid, hist[i]));
-          sync_end_plot.push_back(get_mag(in_s.freqs.sync_end, hist[i]));
+          carrier_plot.push_back(get_mag(in_s.freqs.carrier(), hist[i]));
+          sync_begin_plot.push_back(get_mag(in_s.freqs.sync_begin(), hist[i]));
+          sync_mid_plot.push_back(get_mag(in_s.freqs.sync_mid(), hist[i]));
+          sync_end_plot.push_back(get_mag(in_s.freqs.sync_end(), hist[i]));
           data_plot.push_back(0.);
-          for (auto freq : in_s.freqs.scale) {
-            data_plot.back() += get_mag(freq, hist[i]) + get_mag(freq * 2, hist[i]);
-          }
+          for (size_t j = 0; j < scale_steps; ++j)
+            for (auto freq : in_s.freqs.scale[j])
+              data_plot.back() += get_mag(freq, hist[i]);
+          data_plot.back() /= (scale_steps * scale_width);
         }
         hist_plot << "plot '-' with line title 'carrier', "
                 "'-' with line title 'sync begin', "
