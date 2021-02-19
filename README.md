@@ -9,7 +9,7 @@
 * allow non-2^n buffer sizes for closer tweaking
 
 ## Tweaking
-Generally aim for powers of 2, because that's what I'vcarrier_plot_widthe tested.
+Generally aim for powers of 2, because that's what I've tested.
 
 For low noise environments, try cranking up the frequency multiplier while reducing the symbol width. 
 On my system, I get 100% accuracy at about 640 baud from `1 3 256`, but see if you can beat that ;).
